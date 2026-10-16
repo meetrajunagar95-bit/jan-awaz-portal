@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: jan-awaz-portal
+    env: node
+    plan: free
+    region: singapore
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20.20.2
+      - key: JWT_SECRET
+        value: jan_awaz_super_secret_jwt_key_polytechnic_2026_it_sem5
+      - key: DEFAULT_ADMIN_NAME
+        value: Chief Grievance Officer
+      - key: DEFAULT_ADMIN_EMAIL
+        value: admin@janawaz.gov.in
+      - key: DEFAULT_ADMIN_PASSWORD
+        value: Admin@JanAwaz2026
