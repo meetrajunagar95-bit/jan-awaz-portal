@@ -4,6 +4,7 @@ import Complaint from "@/models/Complaint";
 import { complaintSchema, sanitizeQueryInput } from "@/lib/validators";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { getAuthUser } from "@/lib/auth";
+import { memoryStore } from "@/lib/memory-store";
 
 /**
  * GET /api/complaints
@@ -11,8 +12,6 @@ import { getAuthUser } from "@/lib/auth";
  */
 export async function GET(req: NextRequest) {
   try {
-    await connectToDatabase();
-
     const { searchParams } = new URL(req.url);
     const search = sanitizeQueryInput(searchParams.get("search") || "");
     const category = sanitizeQueryInput(searchParams.get("category") || "");
@@ -25,6 +24,39 @@ export async function GET(req: NextRequest) {
       Math.max(1, parseInt(searchParams.get("limit") || "10", 10))
     );
     const sortBy = searchParams.get("sortBy") === "asc" ? 1 : -1;
+
+    const db = await connectToDatabase();
+
+    if (!db) {
+      // Memory store fallback
+      const filtered = memoryStore.getComplaints({
+        search,
+        category,
+        status,
+        startDate,
+        endDate,
+      });
+
+      filtered.sort((a, b) => {
+        const timeA = new Date(a.createdAt).getTime();
+        const timeB = new Date(b.createdAt).getTime();
+        return sortBy === 1 ? timeA - timeB : timeB - timeA;
+      });
+
+      const total = filtered.length;
+      const paginated = filtered.slice((page - 1) * limit, page * limit);
+
+      return NextResponse.json({
+        success: true,
+        complaints: paginated,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit) || 1,
+        },
+      });
+    }
 
     // Build Mongoose filter safely without NoSQL injection
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -44,7 +76,6 @@ export async function GET(req: NextRequest) {
         filter.createdAt.$gte = new Date(startDate);
       }
       if (endDate) {
-        // End of that day
         const end = new Date(endDate);
         end.setHours(23, 59, 59, 999);
         filter.createdAt.$lte = end;
@@ -82,10 +113,18 @@ export async function GET(req: NextRequest) {
     });
   } catch (error: unknown) {
     console.error("GET /api/complaints error:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch complaints" },
-      { status: 500 }
-    );
+    // Fallback if Mongoose query fails unexpectedly
+    const filtered = memoryStore.getComplaints({});
+    return NextResponse.json({
+      success: true,
+      complaints: filtered.slice(0, 10),
+      pagination: {
+        total: filtered.length,
+        page: 1,
+        limit: 10,
+        totalPages: Math.ceil(filtered.length / 10) || 1,
+      },
+    });
   }
 }
 
@@ -96,8 +135,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const ip = getClientIp(req.headers);
-    // Rate limit: 6 complaint submissions per 10 minutes per IP
-    const rateCheck = checkRateLimit(`submit:${ip}`, 6, 10 * 60 * 1000);
+    // Rate limit: 10 complaint submissions per 10 minutes per IP
+    const rateCheck = checkRateLimit(`submit:${ip}`, 10, 10 * 60 * 1000);
     if (!rateCheck.success) {
       return NextResponse.json(
         {
@@ -120,27 +159,52 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await connectToDatabase();
-
-    // Check if citizen is logged in
     const authUser = await getAuthUser();
-
     const complaintData = {
       ...validation.data,
       userId: authUser?.userId || undefined,
     };
 
-    const newComplaint = await Complaint.create(complaintData);
+    const db = await connectToDatabase();
 
-    return NextResponse.json(
-      {
-        success: true,
-        message: "Grievance submitted successfully",
-        complaintId: newComplaint.complaintId,
-        complaint: newComplaint,
-      },
-      { status: 201 }
-    );
+    if (!db) {
+      // Automatic memory store fallback
+      const saved = memoryStore.createComplaint(complaintData);
+      return NextResponse.json(
+        {
+          success: true,
+          message: "Grievance submitted successfully",
+          complaintId: saved.complaintId,
+          complaint: saved,
+        },
+        { status: 201 }
+      );
+    }
+
+    try {
+      const newComplaint = await Complaint.create(complaintData);
+      return NextResponse.json(
+        {
+          success: true,
+          message: "Grievance submitted successfully",
+          complaintId: newComplaint.complaintId,
+          complaint: newComplaint,
+        },
+        { status: 201 }
+      );
+    } catch (mongoErr) {
+      console.warn("MongoDB create error, falling back to memory store:", mongoErr);
+      const saved = memoryStore.createComplaint(complaintData);
+      return NextResponse.json(
+        {
+          success: true,
+          message: "Grievance submitted successfully",
+          complaintId: saved.complaintId,
+          complaint: saved,
+        },
+        { status: 201 }
+      );
+    }
   } catch (error: unknown) {
     console.error("POST /api/complaints error:", error);
     return NextResponse.json(

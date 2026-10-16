@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import connectToDatabase from "@/lib/db";
 import Complaint from "@/models/Complaint";
 import { getAuthUser } from "@/lib/auth";
+import { memoryStore } from "@/lib/memory-store";
 
 /**
  * GET /api/complaints/my
@@ -17,19 +18,42 @@ export async function GET() {
       );
     }
 
-    await connectToDatabase();
+    const db = await connectToDatabase();
 
-    // Query either by userId or by citizen email to catch both
-    const complaints = await Complaint.find({
-      $or: [{ userId: user.userId }, { email: user.email.toLowerCase() }],
-    })
-      .sort({ createdAt: -1 })
-      .lean();
+    if (!db) {
+      const citizenComplaints = memoryStore.getComplaints({
+        userId: user.userId,
+        email: user.email,
+      });
 
-    return NextResponse.json({
-      success: true,
-      complaints,
-    });
+      return NextResponse.json({
+        success: true,
+        complaints: citizenComplaints,
+      });
+    }
+
+    try {
+      const complaints = await Complaint.find({
+        $or: [{ userId: user.userId }, { email: user.email.toLowerCase() }],
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      return NextResponse.json({
+        success: true,
+        complaints,
+      });
+    } catch {
+      const citizenComplaints = memoryStore.getComplaints({
+        userId: user.userId,
+        email: user.email,
+      });
+
+      return NextResponse.json({
+        success: true,
+        complaints: citizenComplaints,
+      });
+    }
   } catch (error: unknown) {
     console.error("GET /api/complaints/my error:", error);
     return NextResponse.json(

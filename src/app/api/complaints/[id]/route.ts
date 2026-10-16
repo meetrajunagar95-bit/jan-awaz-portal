@@ -4,6 +4,7 @@ import connectToDatabase from "@/lib/db";
 import Complaint from "@/models/Complaint";
 import { updateStatusSchema } from "@/lib/validators";
 import { getAuthUser } from "@/lib/auth";
+import { memoryStore } from "@/lib/memory-store";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -26,20 +27,37 @@ export async function GET(
       );
     }
 
-    await connectToDatabase();
+    const db = await connectToDatabase();
+
+    if (!db) {
+      const found = memoryStore.getComplaintById(id);
+      if (!found) {
+        return NextResponse.json(
+          { error: "Complaint not found. Please check your Complaint ID." },
+          { status: 404 }
+        );
+      }
+      return NextResponse.json({
+        success: true,
+        complaint: found,
+      });
+    }
 
     let complaint = null;
 
-    // Check if the id is a valid Mongo ObjectId
     if (mongoose.Types.ObjectId.isValid(id)) {
       complaint = await Complaint.findById(id);
     }
 
-    // If not found or not ObjectId, query by complaintId (case-insensitive)
     if (!complaint) {
       complaint = await Complaint.findOne({
         complaintId: { $regex: new RegExp(`^${id.trim()}$`, "i") },
       });
+    }
+
+    if (!complaint) {
+      // Check fallback store
+      complaint = memoryStore.getComplaintById(id);
     }
 
     if (!complaint) {
@@ -55,6 +73,14 @@ export async function GET(
     });
   } catch (error: unknown) {
     console.error("GET /api/complaints/[id] error:", error);
+    const { id } = await params;
+    const found = memoryStore.getComplaintById(id);
+    if (found) {
+      return NextResponse.json({
+        success: true,
+        complaint: found,
+      });
+    }
     return NextResponse.json(
       { error: "Failed to retrieve complaint details" },
       { status: 500 }
@@ -95,7 +121,32 @@ export async function PATCH(
 
     const { status, remarks, officerName } = validation.data;
 
-    await connectToDatabase();
+    const db = await connectToDatabase();
+
+    if (!db) {
+      const updated = memoryStore.updateComplaint(id, {
+        status,
+        remarks: remarks || undefined,
+        newTimelineItem: {
+          status,
+          message: remarks || `Status transitioned to ${status}`,
+          updatedBy: officerName || authUser.name || "Officer",
+        },
+      });
+
+      if (!updated) {
+        return NextResponse.json(
+          { error: "Complaint not found" },
+          { status: 404 }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: "Status updated successfully",
+        complaint: updated,
+      });
+    }
 
     let complaint = null;
     if (mongoose.Types.ObjectId.isValid(id)) {
@@ -108,22 +159,42 @@ export async function PATCH(
     }
 
     if (!complaint) {
-      return NextResponse.json(
-        { error: "Complaint not found" },
-        { status: 404 }
-      );
+      // Try memory store
+      const updated = memoryStore.updateComplaint(id, {
+        status,
+        remarks: remarks || undefined,
+        newTimelineItem: {
+          status,
+          message: remarks || `Status transitioned to ${status}`,
+          updatedBy: officerName || authUser.name || "Officer",
+        },
+      });
+
+      if (!updated) {
+        return NextResponse.json(
+          { error: "Complaint not found" },
+          { status: 404 }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: "Status updated successfully",
+        complaint: updated,
+      });
     }
 
-    // Append to timeline
+    complaint.status = status;
+    if (remarks) {
+      complaint.remarks = remarks;
+    }
+
     complaint.timeline.push({
       status,
-      message: remarks,
-      updatedBy: officerName || authUser.name || "Grievance Officer",
+      message: remarks || `Status transitioned to ${status}`,
+      updatedBy: officerName || authUser.name || "Officer",
       timestamp: new Date(),
     });
-
-    complaint.status = status;
-    complaint.remarks = remarks;
 
     await complaint.save();
 

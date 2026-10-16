@@ -4,6 +4,7 @@ import User from "@/models/User";
 import { hashPassword, signToken, setAuthCookie } from "@/lib/auth";
 import { registerSchema } from "@/lib/validators";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { memoryStore } from "@/lib/memory-store";
 
 export async function POST(req: NextRequest) {
   try {
@@ -33,54 +34,126 @@ export async function POST(req: NextRequest) {
 
     const { name, email, password, phone } = validation.data;
 
-    await connectToDatabase();
+    const db = await connectToDatabase();
 
-    // Check if user already exists
-    const existing = await User.findOne({ email });
-    if (existing) {
+    if (!db) {
+      const existing = memoryStore.getUserByEmail(email);
+      if (existing) {
+        return NextResponse.json(
+          { error: "An account with this email already exists" },
+          { status: 409 }
+        );
+      }
+
+      const hashedPassword = await hashPassword(password);
+      const newUser = memoryStore.createUser({
+        name,
+        email,
+        passwordHash: hashedPassword,
+        role: "citizen",
+        phone: phone || undefined,
+      });
+
+      const tokenPayload = {
+        userId: newUser._id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+      };
+
+      const token = signToken(tokenPayload);
+      await setAuthCookie(token);
+
       return NextResponse.json(
-        { error: "An account with this email already exists" },
-        { status: 409 }
+        {
+          success: true,
+          message: "Registration successful",
+          user: tokenPayload,
+        },
+        { status: 201 }
       );
     }
 
-    const hashedPassword = await hashPassword(password);
+    try {
+      // Check if user already exists
+      const existing = await User.findOne({ email });
+      if (existing) {
+        return NextResponse.json(
+          { error: "An account with this email already exists" },
+          { status: 409 }
+        );
+      }
 
-    const newUser = await User.create({
-      name,
-      email,
-      password: hashedPassword,
-      role: "citizen",
-      phone: phone || undefined,
-    });
+      const hashedPassword = await hashPassword(password);
 
-    const tokenPayload = {
-      userId: newUser._id.toString(),
-      name: newUser.name,
-      email: newUser.email,
-      role: newUser.role,
-    };
+      const newUser = await User.create({
+        name,
+        email,
+        password: hashedPassword,
+        role: "citizen",
+        phone: phone || undefined,
+      });
 
-    const token = signToken(tokenPayload);
-    await setAuthCookie(token);
+      const tokenPayload = {
+        userId: newUser._id.toString(),
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+      };
 
-    return NextResponse.json(
-      {
-        success: true,
-        message: "Registration successful",
-        user: {
-          id: newUser._id.toString(),
-          name: newUser.name,
-          email: newUser.email,
-          role: newUser.role,
+      const token = signToken(tokenPayload);
+      await setAuthCookie(token);
+
+      return NextResponse.json(
+        {
+          success: true,
+          message: "Registration successful",
+          user: tokenPayload,
         },
-      },
-      { status: 201 }
-    );
+        { status: 201 }
+      );
+    } catch {
+      // Memory fallback
+      const existing = memoryStore.getUserByEmail(email);
+      if (existing) {
+        return NextResponse.json(
+          { error: "An account with this email already exists" },
+          { status: 409 }
+        );
+      }
+
+      const hashedPassword = await hashPassword(password);
+      const newUser = memoryStore.createUser({
+        name,
+        email,
+        passwordHash: hashedPassword,
+        role: "citizen",
+        phone: phone || undefined,
+      });
+
+      const tokenPayload = {
+        userId: newUser._id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+      };
+
+      const token = signToken(tokenPayload);
+      await setAuthCookie(token);
+
+      return NextResponse.json(
+        {
+          success: true,
+          message: "Registration successful",
+          user: tokenPayload,
+        },
+        { status: 201 }
+      );
+    }
   } catch (error: unknown) {
-    console.error("Register API error:", error);
+    console.error("POST /api/auth/register error:", error);
     return NextResponse.json(
-      { error: "An internal server error occurred while registering user" },
+      { error: "Registration failed. Please try again." },
       { status: 500 }
     );
   }

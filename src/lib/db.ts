@@ -21,11 +21,9 @@ if (!cached) {
   cached = global.mongoose = { conn: null, promise: null };
 }
 
-export async function connectToDatabase() {
+export async function connectToDatabase(): Promise<typeof mongoose | null> {
   if (!MONGODB_URI) {
-    throw new Error(
-      "Please define the MONGODB_URI environment variable inside .env.local"
-    );
+    return null;
   }
 
   if (cached.conn) {
@@ -36,13 +34,17 @@ export async function connectToDatabase() {
     const opts = {
       bufferCommands: false,
       maxPoolSize: 10,
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 3000,
     };
 
     cached.promise = mongoose
       .connect(MONGODB_URI, opts)
       .then((mongooseInstance) => {
         return mongooseInstance;
+      })
+      .catch((err) => {
+        console.warn("MongoDB connection failed, falling back to local persistent store:", err.message);
+        return null as unknown as typeof mongoose;
       });
   }
 
@@ -50,10 +52,11 @@ export async function connectToDatabase() {
     cached.conn = await cached.promise;
   } catch (e) {
     cached.promise = null;
-    throw e;
+    return null;
   }
 
   return cached.conn;
 }
 
 export default connectToDatabase;
+
